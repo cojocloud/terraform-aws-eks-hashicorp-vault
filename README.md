@@ -28,57 +28,57 @@ A production-ready Infrastructure-as-Code (IaC) project that provisions a fully 
                                │ push code / trigger build
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     Jenkins EC2 Instance                            │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Pipeline Stages                                             │   │
-│  │  1. Fetch secrets ──► HashiCorp Vault (AppRole auth)        │   │
-│  │  2. Clone repo    ──► GitHub (using GIT_TOKEN from Vault)   │   │
-│  │  3. tf init       ──► S3 backend (state) + DynamoDB (lock)  │   │
-│  │  4. tf plan/apply ──► AWS API (using AWS creds from Vault)  │   │
-│  │  5. kubeconfig    ──► EKS cluster endpoint                  │   │
-│  │  6. verify        ──► kubectl get nodes / pods              │   │
-│  │  7. [optional] tf destroy                                   │   │
-│  └──────────────────────────────────────────────────────────────┘   │
+│                     Jenkins EC2 Instance                             │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │  Pipeline Stages                                             │    │
+│  │  1. Fetch secrets ──► HashiCorp Vault (AppRole auth)         │    │
+│  │  2. Clone repo    ──► GitHub (using GIT_TOKEN from Vault)    │    │
+│  │  3. tf init       ──► S3 backend (state) + DynamoDB (lock)   │    │
+│  │  4. tf plan/apply ──► AWS API (using AWS creds from Vault)   │    │
+│  │  5. kubeconfig    ──► EKS cluster endpoint                   │    │
+│  │  6. verify        ──► kubectl get nodes / pods               │    │
+│  │  7. [optional] tf destroy                                    │    │
+│  └──────────────────────────────────────────────────────────────┘    │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │ terraform apply
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          AWS Cloud (us-east-1)                      │
 │                                                                     │
-│  ┌─────────────────── VPC 10.0.0.0/16 ──────────────────────────┐  │
-│  │                                                               │  │
-│  │   Public Subnets (us-east-1a/1b)   Private Subnets           │  │
-│  │   10.0.64.0/19  10.0.96.0/19       10.0.0.0/19  10.0.32.0/19│  │
-│  │         │                                  │                  │  │
-│  │         │                                  │                  │  │
-│  │   ┌─────┴──────┐                    ┌──────┴──────────┐      │  │
-│  │   │  NAT GW    │                    │   EKS Managed   │      │  │
-│  │   │  (single)  │◄───────────────────│   Node Group    │      │  │
-│  │   └─────┬──────┘    outbound        │  (t3.large x2+) │      │  │
-│  │         │           traffic         └──────┬──────────┘      │  │
-│  │   ┌─────┴──────┐                           │                 │  │
-│  │   │  Internet  │                    ┌──────┴──────────┐      │  │
-│  │   │  Gateway   │                    │  EKS Control    │      │  │
-│  │   └────────────┘                    │  Plane (managed)│      │  │
-│  │                                     └─────────────────┘      │  │
-│  └───────────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────── VPC 10.0.0.0/16 ──────────────────────────┐   │
+│  │                                                              │   │
+│  │   Public Subnets (us-east-1a/1b)   Private Subnets           │   │
+│  │   10.0.64.0/19  10.0.96.0/19       10.0.0.0/19  10.0.32.0/19 │   │
+│  │         │                                  │                 │   │
+│  │         │                                  │                 │   │
+│  │   ┌─────┴──────┐                    ┌──────┴──────────┐      │   │
+│  │   │  NAT GW    │                    │   EKS Managed   │      │   │
+│  │   │  (single)  │◄───────────────────│   Node Group    │      │   │
+│  │   └─────┬──────┘    outbound        │  (t3.large x2+) │      │   │
+│  │         │           traffic         └──────┬──────────┘      │   │
+│  │   ┌─────┴──────┐                           │                 │   │
+│  │   │  Internet  │                    ┌──────┴──────────┐      │   │
+│  │   │  Gateway   │                    │  EKS Control    │      │   │
+│  │   └────────────┘                    │  Plane (managed)│      │   │
+│  │                                     └─────────────────┘      │   │
+│  └──────────────────────────────────────────────────────────────-   │
 │                                                                     │
 │  Workloads running on EKS nodes (kube-system namespace):            │
-│  ┌──────────────────┐  ┌────────────────────┐  ┌────────────────┐  │
-│  │ Cluster          │  │ AWS Load Balancer  │  │  Prometheus +  │  │
-│  │ Autoscaler       │  │ Controller         │  │  Alertmanager  │  │
-│  │ (IRSA role)      │  │ (IRSA role)        │  │  (Helm)        │  │
-│  └──────────────────┘  └────────────────────┘  └────────────────┘  │
+│  ┌──────────────────┐  ┌────────────────────┐  ┌────────────────┐   │
+│  │ Cluster          │  │ AWS Load Balancer  │  │  Prometheus +  │   │
+│  │ Autoscaler       │  │ Controller         │  │  Alertmanager  │   │
+│  │ (IRSA role)      │  │ (IRSA role)        │  │  (Helm)        │   │
+│  └──────────────────┘  └────────────────────┘  └────────────────┘   │
 │                                                                     │
 │  EKS Add-ons (managed):                                             │
-│  kube-proxy  |  vpc-cni  |  coredns  |  aws-ebs-csi-driver         │
+│  kube-proxy  |  vpc-cni  |  coredns  |  aws-ebs-csi-driver          │
 │                                                                     │
 │  IAM Resources:                                                     │
-│  ┌───────────────┐  ┌─────────────────┐  ┌───────────────────────┐ │
-│  │ eks-admin     │  │ allow-eks-access │  │ eks-admin IAM Group   │ │
-│  │ IAM Role      │  │ IAM Policy      │  │ (user1 member)        │ │
-│  └───────────────┘  └─────────────────┘  └───────────────────────┘ │
+│  ┌───────────────┐  ┌─────────────────┐  ┌───────────────────────┐  │
+│  │ eks-admin     │  │ allow-eks-access │  │ eks-admin IAM Group  │  │
+│  │ IAM Role      │  │ IAM Policy      │  │ (user1 member)        │  │
+│  └───────────────┘  └─────────────────┘  └───────────────────────┘  │
 │                                                                     │
 │  State Backend:                                                     │
 │  ┌─────────────────────────────┐  ┌──────────────────────────────┐  │
@@ -92,11 +92,11 @@ A production-ready Infrastructure-as-Code (IaC) project that provisions a fully 
 │                   HashiCorp Vault Server                            │
 │                                                                     │
 │  Secrets:                                                           │
-│  aws/terraform-project  →  aws_access_key_id, aws_secret_access_key│
-│  secret/github          →  pat (GitHub Personal Access Token)      │
+│  aws/terraform-project  →  aws_access_key_id, aws_secret_access_key │
+│  secret/github          →  pat (GitHub Personal Access Token)       │
 │                                                                     │
 │  Auth method: AppRole                                               │
-│  Credentials stored in Jenkins: vault-role-id, vault-secret-id,    │
+│  Credentials stored in Jenkins: vault-role-id, vault-secret-id,     │
 │                                  VAULT_URL                          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
