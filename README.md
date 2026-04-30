@@ -1,6 +1,6 @@
 # AWS EKS Infrastructure with Terraform, Jenkins CI/CD, and HashiCorp Vault
 
-A production-ready Infrastructure-as-Code (IaC) project that provisions a fully managed AWS EKS cluster, complete with autoscaling, load balancing, monitoring, and a secure Jenkins CI/CD pipeline backed by HashiCorp Vault for secrets management.
+Provisions a fully managed AWS EKS cluster using Terraform, automated through a Jenkins CI/CD pipeline, with AWS and GitHub credentials securely managed by HashiCorp Vault.
 
 ---
 
@@ -8,14 +8,14 @@ A production-ready Infrastructure-as-Code (IaC) project that provisions a fully 
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| Networking | AWS VPC (Terraform module) | Isolated network with public/private subnets |
+| Networking | AWS VPC | Isolated network with public/private subnets |
 | Kubernetes | AWS EKS 1.32 | Managed control plane + managed node groups |
 | Secrets | HashiCorp Vault (AppRole) | Secure storage of AWS and GitHub credentials |
-| CI/CD | Jenkins | Automated pipeline to plan/apply/destroy infra |
-| Autoscaling | Cluster Autoscaler | Scale worker nodes based on pod demand |
+| CI/CD | Jenkins | Automated pipeline to provision or destroy infra |
+| Autoscaling | Cluster Autoscaler | Scales worker nodes based on pod demand |
 | Load Balancing | AWS Load Balancer Controller | Kubernetes-native ALB/NLB provisioning |
 | Monitoring | Prometheus + Alertmanager | Cluster and application metrics |
-| State Backend | S3 + DynamoDB | Remote state with locking |
+| State Backend | S3 + DynamoDB | Remote Terraform state with locking |
 
 ---
 
@@ -25,114 +25,106 @@ A production-ready Infrastructure-as-Code (IaC) project that provisions a fully 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Developer / Operator                         │
 └──────────────────────────────┬──────────────────────────────────────┘
-                               │ push code / trigger build
+                               │ Build with Parameters (Apply/Destroy)
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     Jenkins EC2 Instance                             │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐    │
-│  │  Pipeline Stages                                             │    │
-│  │  1. Fetch secrets ──► HashiCorp Vault (AppRole auth)         │    │
-│  │  2. Clone repo    ──► GitHub (using GIT_TOKEN from Vault)    │    │
-│  │  3. tf init       ──► S3 backend (state) + DynamoDB (lock)   │    │
-│  │  4. tf plan/apply ──► AWS API (using AWS creds from Vault)   │    │
-│  │  5. kubeconfig    ──► EKS cluster endpoint                   │    │
-│  │  6. verify        ──► kubectl get nodes / pods               │    │
-│  │  7. [optional] tf destroy                                    │    │
-│  └──────────────────────────────────────────────────────────────┘    │
+│                     Jenkins EC2 Instance                            │
+│                                                                     │
+│  Pipeline Stages (Apply):                                           │
+│  1. Fetch secrets  ──► HashiCorp Vault (AppRole auth)               │
+│  2. Clone repo     ──► GitHub                                       │
+│  3. tf init        ──► S3 backend + DynamoDB lock                   │
+│  4. tf plan/apply  ──► AWS API                                      │
+│  5. kubeconfig     ──► EKS cluster endpoint                         │
+│  6. verify         ──► kubectl get nodes / pods                     │
+│                                                                     │
+│  Pipeline Stages (Destroy):                                         │
+│  1. Fetch secrets  ──► HashiCorp Vault                              │
+│  2. Clone repo     ──► GitHub                                       │
+│  3. tf init        ──► S3 backend                                   │
+│  4. tf destroy     ──► AWS API                                      │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │ terraform apply
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          AWS Cloud (us-east-1)                      │
+│                       AWS Cloud (us-east-1)                         │
 │                                                                     │
-│  ┌─────────────────── VPC 10.0.0.0/16 ──────────────────────────┐   │
-│  │                                                              │   │
-│  │   Public Subnets (us-east-1a/1b)   Private Subnets           │   │
-│  │   10.0.64.0/19  10.0.96.0/19       10.0.0.0/19  10.0.32.0/19 │   │
-│  │         │                                  │                 │   │
-│  │         │                                  │                 │   │
-│  │   ┌─────┴──────┐                    ┌──────┴──────────┐      │   │
-│  │   │  NAT GW    │                    │   EKS Managed   │      │   │
-│  │   │  (single)  │◄───────────────────│   Node Group    │      │   │
-│  │   └─────┬──────┘    outbound        │  (t3.large x2+) │      │   │
-│  │         │           traffic         └──────┬──────────┘      │   │
-│  │   ┌─────┴──────┐                           │                 │   │
-│  │   │  Internet  │                    ┌──────┴──────────┐      │   │
-│  │   │  Gateway   │                    │  EKS Control    │      │   │
-│  │   └────────────┘                    │  Plane (managed)│      │   │
-│  │                                     └─────────────────┘      │   │
-│  └──────────────────────────────────────────────────────────────-   │
+│  ┌──────────────────── VPC 10.0.0.0/16 ─────────────────────────┐   │
+│  │  Public Subnets          │  Private Subnets                   │   │
+│  │  10.0.64.0/19            │  10.0.0.0/19                       │   │
+│  │  10.0.96.0/19            │  10.0.32.0/19                      │   │
+│  │         │                         │                           │   │
+│  │   ┌─────┴──────┐          ┌───────┴─────────┐                 │   │
+│  │   │  NAT GW    │◄─────────│  EKS Nodes      │                 │   │
+│  │   │  Internet  │ outbound │  (t3.large x2+) │                 │   │
+│  │   │  Gateway   │ traffic  │                 │                 │   │
+│  │   └────────────┘          └───────┬─────────┘                 │   │
+│  │                           ┌───────┴─────────┐                 │   │
+│  │                           │  EKS Control    │                 │   │
+│  │                           │  Plane (managed)│                 │   │
+│  │                           └─────────────────┘                 │   │
+│  └───────────────────────────────────────────────────────────────┘   │
 │                                                                     │
-│  Workloads running on EKS nodes (kube-system namespace):            │
-│  ┌──────────────────┐  ┌────────────────────┐  ┌────────────────┐   │
-│  │ Cluster          │  │ AWS Load Balancer  │  │  Prometheus +  │   │
-│  │ Autoscaler       │  │ Controller         │  │  Alertmanager  │   │
-│  │ (IRSA role)      │  │ (IRSA role)        │  │  (Helm)        │   │
-│  └──────────────────┘  └────────────────────┘  └────────────────┘   │
+│  Workloads on EKS:                                                  │
+│  Cluster Autoscaler | AWS Load Balancer Controller | Prometheus     │
 │                                                                     │
-│  EKS Add-ons (managed):                                             │
-│  kube-proxy  |  vpc-cni  |  coredns  |  aws-ebs-csi-driver          │
-│                                                                     │
-│  IAM Resources:                                                     │
-│  ┌───────────────┐  ┌─────────────────┐  ┌───────────────────────┐  │
-│  │ eks-admin     │  │ allow-eks-access │  │ eks-admin IAM Group  │  │
-│  │ IAM Role      │  │ IAM Policy      │  │ (user1 member)        │  │
-│  └───────────────┘  └─────────────────┘  └───────────────────────┘  │
+│  EKS Managed Add-ons:                                               │
+│  kube-proxy | vpc-cni | coredns | aws-ebs-csi-driver               │
 │                                                                     │
 │  State Backend:                                                     │
-│  ┌─────────────────────────────┐  ┌──────────────────────────────┐  │
-│  │ S3 Bucket                   │  │ DynamoDB Table               │  │
-│  │ devops-projects-terraform-  │  │ terraform-state-lock         │  │
-│  │ backends / eks/terraform... │  │ (prevents concurrent apply)  │  │
-│  └─────────────────────────────┘  └──────────────────────────────┘  │
+│  S3 Bucket (terraform state) + DynamoDB Table (state lock)          │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
-│                   HashiCorp Vault Server                            │
+│                   HashiCorp Vault Server (separate EC2)             │
 │                                                                     │
 │  Secrets:                                                           │
 │  aws/terraform-project  →  aws_access_key_id, aws_secret_access_key │
 │  secret/github          →  pat (GitHub Personal Access Token)       │
 │                                                                     │
-│  Auth method: AppRole                                               │
-│  Credentials stored in Jenkins: vault-role-id, vault-secret-id,     │
-│                                  VAULT_URL                          │
+│  Auth: AppRole  |  Port: 8200                                       │
+│  Jenkins stores only: VAULT_URL, vault-role-id, vault-secret-id     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Implementation Order
+## Server Setup Overview
 
-Follow these phases in sequence. Each phase depends on the previous one.
+You need **two EC2 instances** before running the pipeline:
 
-### Phase 0 — Prerequisites (Manual, One-Time Setup)
+| Server | Purpose | Minimum Size |
+|--------|---------|-------------|
+| Jenkins Server | Runs the CI/CD pipeline | t3.medium |
+| Vault Server | Stores secrets securely | t2.micro |
 
-Before running any Terraform or Jenkins pipeline, set up the supporting infrastructure manually.
+Both must be in the same VPC so they can communicate via private IP.
 
-**Step 0.1 — AWS Account Setup**
-- Create or log in to an AWS account.
-- Create an IAM user (or role) with these managed policies attached:
-  - `AmazonEKSFullAccess`
-  - `AmazonEC2FullAccess`
-  - `IAMFullAccess`
-  - `AmazonS3FullAccess` (for the Terraform state bucket)
-  - `AmazonDynamoDBFullAccess` (for the state lock table)
-- Generate and save an **Access Key ID** and **Secret Access Key** for this user.
+---
 
-**Step 0.2 — Terraform State Backend Setup**
-Before any `terraform init`, the S3 bucket and DynamoDB table must exist:
+## Step-by-Step Implementation
+
+### Step 1 — AWS Prerequisites
+
+**1.1 — Create IAM user for Terraform** with these policies:
+- `AmazonEKSFullAccess`
+- `AmazonEC2FullAccess`
+- `IAMFullAccess`
+- `AmazonS3FullAccess`
+- `AmazonDynamoDBFullAccess`
+
+Save the **Access Key ID** and **Secret Access Key** — you will store these in Vault later.
+
+**1.2 — Create Terraform state backend resources**
+
+Run these from your local machine or AWS CLI:
 
 ```bash
-# Create S3 bucket (match the name in backend.tf)
-aws s3api create-bucket \
-  --bucket devops-projects-terraform-backends \
-  --region us-east-1
+# Create S3 bucket — change the name to something unique to your account
+aws s3api create-bucket --bucket YOUR-BUCKET-NAME --region us-east-1
 
-# Enable versioning on the bucket
 aws s3api put-bucket-versioning \
-  --bucket devops-projects-terraform-backends \
+  --bucket YOUR-BUCKET-NAME \
   --versioning-configuration Status=Enabled
 
 # Create DynamoDB table for state locking
@@ -144,83 +136,190 @@ aws dynamodb create-table \
   --region us-east-1
 ```
 
-**Step 0.3 — EC2 Instance for Jenkins**
-- Launch an EC2 instance (Ubuntu 22.04 recommended, t3.medium minimum).
-- Install Jenkins:
-  ```bash
-  sudo apt update && sudo apt install -y openjdk-17-jdk
-  curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | sudo gpg --dearmor -o /usr/share/keyrings/jenkins-keyring.gpg
-  echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] https://pkg.jenkins.io/debian-stable binary/" | sudo tee /etc/apt/sources.list.d/jenkins.list
-  sudo apt update && sudo apt install -y jenkins
-  sudo systemctl enable jenkins && sudo systemctl start jenkins
-  ```
-- Install kubectl on the Jenkins server:
-  ```bash
-  curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-  sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-  ```
-- Install AWS CLI:
-  ```bash
-  curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
-  unzip awscliv2.zip && sudo ./aws/install
-  ```
-- Install required Jenkins plugins via Manage Jenkins > Plugins:
-  - Pipeline
-  - Terraform
-  - HashiCorp Vault
-  - AWS Credentials
-  - Git
-
-**Step 0.4 — HashiCorp Vault Server Setup**
-- Launch a separate EC2 instance for Vault (or use an existing server).
-- Install and initialize Vault:
-  ```bash
-  wget https://releases.hashicorp.com/vault/1.15.0/vault_1.15.0_linux_amd64.zip
-  unzip vault_1.15.0_linux_amd64.zip && sudo mv vault /usr/local/bin/
-  vault server -dev  # for dev/testing only; use production config for real deployments
-  ```
-- Store secrets:
-  ```bash
-  export VAULT_ADDR='http://<vault-server-ip>:8200'
-  vault login <root-token>
-
-  # Store AWS credentials
-  vault kv put aws/terraform-project \
-    aws_access_key_id=<YOUR_ACCESS_KEY> \
-    aws_secret_access_key=<YOUR_SECRET_KEY>
-
-  # Store GitHub PAT
-  vault kv put secret/github pat=<YOUR_GITHUB_PAT>
-  ```
-- Enable AppRole auth and create a role:
-  ```bash
-  vault auth enable approle
-  vault write auth/approle/role/jenkins-role \
-    secret_id_ttl=24h \
-    token_ttl=1h \
-    token_policies="default,jenkins-policy"
-
-  # Get role_id and secret_id
-  vault read auth/approle/role/jenkins-role/role-id
-  vault write -f auth/approle/role/jenkins-role/secret-id
-  ```
-
-**Step 0.5 — Configure Jenkins Credentials**
-In Jenkins > Manage Jenkins > Credentials, add three Secret Text credentials:
-- `VAULT_URL` — the full URL of your Vault server (e.g., `http://1.2.3.4:8200`)
-- `vault-role-id` — the AppRole role ID from Step 0.4
-- `vault-secret-id` — the AppRole secret ID from Step 0.4
+Then update `backend.tf` with your bucket name:
+```hcl
+bucket = "YOUR-BUCKET-NAME"
+```
 
 ---
 
-### Phase 1 — Customize Terraform Configuration
+### Step 2 — Vault Server Setup
 
-**Step 1.1 — Update `backend.tf`**
-Replace the S3 bucket name with your own bucket (created in Step 0.2):
+SSH into your **Vault EC2 instance** and run all of the following.
+
+**2.1 — Install Vault**
+
+```bash
+wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com jammy main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+
+sudo apt update && sudo apt install -y vault
+which vault
+```
+
+**2.2 — Run Vault as a systemd service**
+
+> Important: do NOT run `vault server -dev &` as a background process. It dies when your SSH session ends. Use systemd so it stays running permanently.
+
+```bash
+sudo tee /etc/systemd/system/vault.service > /dev/null << 'EOF'
+[Unit]
+Description=HashiCorp Vault Dev Server
+After=network.target
+
+[Service]
+User=ubuntu
+ExecStart=/usr/bin/vault server -dev -dev-listen-address=0.0.0.0:8200 -dev-root-token-id=root
+Restart=on-failure
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+> If Vault is installed at a different path, find it with `which vault` and update `ExecStart` accordingly.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable vault
+sudo systemctl start vault
+sudo systemctl status vault
+```
+
+**2.3 — Configure Vault**
+
+```bash
+export VAULT_ADDR="http://127.0.0.1:8200"
+export VAULT_TOKEN="root"
+
+# Verify Vault is responding
+vault status
+
+# Enable AppRole authentication
+vault auth enable approle
+
+# Enable KV secrets engine at aws/ path
+vault secrets enable -path=aws kv
+
+# Write the access policy to a file (avoids heredoc issues)
+cat > /tmp/jenkins-policy.hcl << 'EOF'
+path "aws/terraform-project" { capabilities = ["read"] }
+path "secret/data/github" { capabilities = ["read"] }
+EOF
+
+vault policy write jenkins-policy /tmp/jenkins-policy.hcl
+
+# Create the AppRole
+vault write auth/approle/role/jenkins-role token_policies="jenkins-policy" secret_id_ttl=0 token_ttl=1h
+
+# Store your secrets (replace with real values)
+vault kv put aws/terraform-project aws_access_key_id="YOUR_AWS_KEY" aws_secret_access_key="YOUR_AWS_SECRET"
+vault kv put secret/github pat="YOUR_GITHUB_PAT"
+
+# Get the credentials Jenkins will use
+vault read auth/approle/role/jenkins-role/role-id
+vault write -f auth/approle/role/jenkins-role/secret-id
+```
+
+Save the `role_id` and `secret_id` output — you need them in Step 4.
+
+**2.4 — Open port 8200 in the Vault server's Security Group**
+
+In AWS Console > EC2 > Security Groups > Vault server's SG > Inbound Rules, add:
+- Type: Custom TCP
+- Port: 8200
+- Source: the Jenkins server's private IP (e.g., `172.31.x.x/32`) or the VPC CIDR (`172.31.0.0/16`)
+
+**2.5 — Test connectivity from the Vault server**
+
+```bash
+curl http://127.0.0.1:8200/v1/sys/health
+```
+
+Should return JSON with `"initialized": true`.
+
+> **Important:** Vault dev mode stores everything in memory. Every time Vault restarts, all secrets and configuration are wiped. Re-run Step 2.3 after any restart. See `hashicorp-vault-explained.md` for a full explanation.
+
+---
+
+### Step 3 — Jenkins Server Setup
+
+SSH into your **Jenkins EC2 instance** and run all of the following.
+
+**3.1 — Install Java and Jenkins**
+
+```bash
+sudo apt update && sudo apt install -y openjdk-17-jdk
+
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | sudo gpg --dearmor -o /usr/share/keyrings/jenkins-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] https://pkg.jenkins.io/debian-stable binary/" | sudo tee /etc/apt/sources.list.d/jenkins.list
+
+sudo apt update && sudo apt install -y jenkins
+sudo systemctl enable jenkins && sudo systemctl start jenkins
+```
+
+**3.2 — Install required tools on the Jenkins server**
+
+```bash
+# AWS CLI
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip awscliv2.zip && sudo ./aws/install
+
+# kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+# Vault CLI (Jenkins needs this to run vault commands in the pipeline)
+wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com jammy main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+sudo apt update && sudo apt install -y vault
+
+# Verify all tools are accessible
+aws --version
+kubectl version --client
+vault --version
+```
+
+**3.3 — Install Jenkins plugins**
+
+Go to **Manage Jenkins > Plugins > Available plugins** and install:
+
+| Search For | Plugin Name | Notes |
+|-----------|------------|-------|
+| `Pipeline` | **Pipeline** | Published by Jenkins — installs the full pipeline suite |
+| `Vault` | **HashiCorp Vault** | For Vault integration |
+| `AWS Credentials` | **AWS Credentials** | For AWS credential storage |
+| `Git` | **Git** | For SCM checkout |
+| `Terraform` | **Terraform** | For Terraform build steps |
+
+> Do not install "Build Pipeline" — that is a different, older plugin.
+
+**3.4 — Add Jenkins credentials**
+
+Go to **Manage Jenkins > Credentials > Global > Add Credentials**.
+
+Add three credentials of type **Secret Text**:
+
+| Credential ID | Value |
+|--------------|-------|
+| `VAULT_URL` | `http://<vault-server-private-ip>:8200` |
+| `vault-role-id` | the role_id from Step 2.3 |
+| `vault-secret-id` | the secret_id from Step 2.3 |
+
+> Use the **private IP** of the Vault server (e.g., `172.31.x.x`), not the public IP or `localhost`. Both servers are in the same VPC so internal communication is free and reliable.
+
+---
+
+### Step 4 — Customize Terraform Files
+
+**4.1 — Update `backend.tf`**
 ```hcl
 terraform {
   backend "s3" {
-    bucket         = "YOUR-BUCKET-NAME"   # change this
+    bucket         = "YOUR-BUCKET-NAME"   # must match what you created in Step 1.2
     key            = "eks/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "terraform-state-lock"
@@ -228,145 +327,135 @@ terraform {
 }
 ```
 
-**Step 1.2 — Review and Update `variables.tf`**
-Adjust defaults to match your environment:
+**4.2 — Update `variables.tf`** (optional — change defaults to suit your needs)
 ```hcl
-variable "cluster_name"       { default = "my-eks-cluster" }     # rename as needed
-variable "cluster_version"    { default = 1.27 }                  # update if newer version needed
-variable "region"             { default = "us-east-1" }           # your preferred region
-variable "availability_zones" { default = ["us-east-1a", "us-east-1b"] }
+variable "cluster_name"    { default = "demo-eks-cluster" }
+variable "cluster_version" { default = "1.32" }
+variable "region"          { default = "us-east-1" }
 ```
 
-**Step 1.3 — Review `Jenkinsfile`**
-- Update the GitHub repo URL in the `Checkout Source Code` stage if you forked this repo.
-- Remove or mask the debug `echo` lines that print AWS credentials (security best practice).
+**4.3 — Update the repo URL in `Jenkinsfile`**
+
+In the `Checkout Source Code` stage, ensure the URL matches your fork:
+```groovy
+git clone https://github.com/YOUR-USERNAME/YOUR-REPO.git
+```
 
 ---
 
-### Phase 2 — Run the Jenkins Pipeline
+### Step 5 — Create and Run the Jenkins Pipeline
 
-**Step 2.1 — Create Jenkins Pipeline Job**
-- New Item > Pipeline
-- In Pipeline Definition, choose "Pipeline script from SCM"
-- Set your GitHub repo URL and credentials (using the GIT_TOKEN from Vault)
-- Jenkinsfile path: `Jenkinsfile`
+**5.1 — Create a new pipeline job**
 
-**Step 2.2 — Trigger the Pipeline**
-The pipeline executes these stages in order:
+- Jenkins Dashboard > New Item > **Pipeline**
+- Under **Pipeline Definition**: select **Pipeline script from SCM**
+- SCM: **Git**
+- Repository URL: `https://github.com/YOUR-USERNAME/YOUR-REPO.git`
+- Credentials: **- none -** (the repo is public — no credentials needed here)
+- Branch: `*/main`
+- Script Path: `Jenkinsfile`
+- Save
 
-| Stage | What Happens |
-|-------|-------------|
-| Fetch Credentials from Vault | Jenkins authenticates to Vault via AppRole; retrieves AWS keys and GitHub PAT; writes them to `vault_env.sh` |
-| Checkout Source Code | Clones this repo using the GitHub PAT |
-| Install Terraform | Downloads Terraform 1.3.4 binary into the workspace |
-| Terraform Init | Runs `terraform init` — downloads providers and connects to the S3/DynamoDB backend |
-| Terraform Plan and Apply | Runs `terraform plan` then `terraform apply -auto-approve` — provisions all AWS resources |
-| Update Kubeconfig and Verify | Updates Jenkins user's kubeconfig; runs `kubectl get nodes` to confirm connectivity |
-| Prompt for Terraform Destroy | Pauses pipeline for manual confirmation before destroying anything |
-| Terraform Destroy (optional) | If confirmed, tears down all provisioned resources |
+**5.2 — Run the pipeline**
 
-**Step 2.3 — Monitor the Apply**
-EKS provisioning takes 12–20 minutes. Watch the Jenkins console output. The pipeline will fail fast if:
-- Vault credentials are wrong (Stage 1)
-- AWS permissions are insufficient (Stage 4)
-- The S3 bucket or DynamoDB table doesn't exist (Stage 4, init)
+Click **Build with Parameters**. You will see a dropdown:
+
+| Choice | What It Does |
+|--------|-------------|
+| `Apply` | Provisions all infrastructure (VPC, EKS, monitoring, autoscaler, LBC) |
+| `Destroy` | Tears down all provisioned infrastructure |
+
+Select **Apply** and click Build.
+
+**5.3 — Pipeline stages (Apply)**
+
+| Stage | Duration | What Happens |
+|-------|---------|-------------|
+| Fetch Credentials from Vault | ~10s | Logs into Vault via AppRole; retrieves AWS keys and GitHub PAT |
+| Checkout Source Code | ~10s | Clones the repo |
+| Install Terraform | ~30s | Downloads Terraform binary |
+| Terraform Init | ~1min | Downloads providers; connects to S3 backend |
+| Terraform Plan and Apply | ~15–20min | Provisions VPC, EKS, IAM, autoscaler, LBC, Prometheus |
+| Update Kubeconfig and Verify | ~1min | Configures kubectl; verifies nodes and pods |
+
+**5.4 — To destroy infrastructure**
+
+Click **Build with Parameters** > select **Destroy** > Build.
+
+The pipeline will run `terraform destroy -auto-approve` — no blocking prompt, no hanging.
 
 ---
 
-### Phase 3 — Verify the Infrastructure
+### Step 6 — Verify the Infrastructure
 
-**Step 3.1 — AWS Console Checks**
-- EKS > Clusters: confirm `demo-eks-cluster` is Active
-- EC2 > Auto Scaling Groups: confirm the node group ASG exists with 2 instances
-- VPC > Your VPCs: confirm the `main` VPC with 4 subnets
-
-**Step 3.2 — Kubernetes Connectivity**
-Configure your local kubeconfig (if accessing from outside Jenkins):
 ```bash
+# Configure local kubectl access
 aws eks update-kubeconfig --name demo-eks-cluster --region us-east-1
-```
 
-Verify the cluster:
-```bash
-kubectl get nodes                          # should show 2 t3.large nodes
-kubectl get pods --all-namespaces          # should show system pods running
-kubectl get pods -n kube-system            # cluster-autoscaler, LBC, coredns, etc.
-kubectl get pods -n prometheus             # prometheus and alertmanager pods
-```
+# Verify nodes (expect 2 t3.large nodes)
+kubectl get nodes
 
-**Step 3.3 — Verify Add-ons**
-```bash
+# Verify system pods
+kubectl get pods --all-namespaces
+
+# Verify EKS managed addons
 aws eks list-addons --cluster-name demo-eks-cluster
-# Expected: kube-proxy, vpc-cni, coredns, aws-ebs-csi-driver
-```
 
-**Step 3.4 — Verify Monitoring**
-```bash
-kubectl get svc -n prometheus
-# Port-forward to access Prometheus UI locally:
+# Access Prometheus UI (port-forward)
 kubectl port-forward svc/prometheus-server 9090:80 -n prometheus
-# Open http://localhost:9090 in your browser
+# Open http://localhost:9090
 ```
 
 ---
 
-### Phase 4 — Teardown (When Done)
+## Common Issues and Fixes
 
-Use the Jenkins pipeline's "Prompt for Terraform Destroy" stage, or run manually:
-```bash
-aws eks update-kubeconfig --name demo-eks-cluster --region us-east-1
-terraform destroy -auto-approve
-```
-
-> **Order matters on destroy**: Helm releases and Kubernetes resources must be deleted before the EKS cluster, and the EKS cluster before the VPC. Terraform handles this automatically via dependency tracking as long as all resources were created by Terraform.
-
----
-
-## Known Issues and Things to Customize Before Use
-
-| File | Issue | Action Required |
-|------|-------|----------------|
-| `backend.tf` | Hardcoded S3 bucket name | Change to your own bucket |
-| `autoscaler-manifest.tf:176` | Image `k8s.gcr.io` registry is deprecated; v1.23.1 doesn't match EKS 1.27 | Change to `registry.k8s.io/autoscaling/cluster-autoscaler:v1.27.x` |
-| `Jenkinsfile:91,92` | Prints AWS credentials to build log | Remove those `echo` debug lines |
-| `Jenkinsfile:61` | Hardcoded GitHub repo URL | Update to your fork's URL |
-| `monitoring.tf:47` | Prometheus memory limit is 50Mi (too low) | Increase to at least 512Mi |
-| `variables.tf:7` | EKS 1.27 is approaching end-of-life | Consider upgrading to 1.29 or 1.30 |
-| `provider.tf` | Missing `kubernetes` in `required_providers` | See `IMPLEMENTATION_GUIDE.md` for fix |
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `vault: not found` in pipeline | Vault CLI not installed on Jenkins server | Install vault on Jenkins server (Step 3.2) |
+| `connection refused` to Vault | Vault process not running or bound to wrong address | Check systemd service; ensure `0.0.0.0:8200` binding |
+| `dial tcp 127.0.0.1:8200` | `VAULT_URL` set to localhost in Jenkins | Update credential to Vault server's private IP |
+| `403 permission denied` on AppRole login | Wrong role_id/secret_id or AppRole not enabled | Re-run Vault configuration (Step 2.3) |
+| `403` on `secret/github` read | Policy path wrong — KV v2 needs `/data/` | Use `secret/data/github` in policy (not `secret/github`) |
+| Vault config wiped after restart | Dev mode stores in memory | Re-run Step 2.3 after every Vault restart |
+| `Blocks of type "kubernetes" are not expected` | Helm provider v3.x installed | Pin to `~> 2.6` in `provider.tf` |
+| Pipeline hangs after provisioning | Old destroy prompt was a blocking `input()` | Updated — now uses `ACTION` parameter selected before run |
+| `cd aws-eks-terraform: No such file` | Wrong directory name in Jenkinsfile | Directory is `terraform-aws-eks-hashicorp-vault` |
+| `address already in use` on port 8200 | Old Vault process still running | `sudo kill $(sudo lsof -ti :8200)` then restart service |
 
 ---
 
-## Cost Estimate
-
-Running this stack continuously in us-east-1:
+## Cost Estimate (us-east-1)
 
 | Resource | Approximate Monthly Cost |
 |----------|--------------------------|
 | EKS Control Plane | ~$73 |
-| 2x t3.large nodes (On-Demand) | ~$120 |
+| 2x t3.large nodes | ~$120 |
 | NAT Gateway | ~$32 |
-| S3 + DynamoDB (state) | ~$1 |
+| S3 + DynamoDB | ~$1 |
 | **Total** | **~$226/month** |
 
-Use `terraform destroy` when not actively testing to avoid unnecessary charges.
+Run the **Destroy** pipeline when not actively using the cluster to avoid charges.
 
 ---
 
 ## File Reference
 
-| File | Role |
-|------|------|
-| `provider.tf` | AWS, kubectl, and Helm provider declarations |
-| `backend.tf` | S3 remote state backend with DynamoDB locking |
-| `variables.tf` | Configurable inputs (cluster name, region, addons) |
+| File | Purpose |
+|------|---------|
+| `provider.tf` | AWS, kubectl, Helm, Kubernetes provider declarations |
+| `backend.tf` | S3 remote state + DynamoDB locking |
+| `variables.tf` | Cluster name, version, region, addon versions |
 | `vpc.tf` | VPC, public/private subnets, NAT gateway |
-| `eks.tf` | EKS cluster, node groups, aws-auth configmap, Kubernetes provider |
-| `iam.tf` | IAM roles, policies, user, and group for cluster access |
+| `eks.tf` | EKS cluster, managed node groups, aws-auth ConfigMap |
+| `iam.tf` | IAM roles, policies, user and group for cluster access |
 | `autoscaler-iam.tf` | IRSA role for Cluster Autoscaler |
 | `autoscaler-manifest.tf` | Kubernetes RBAC + Deployment for Cluster Autoscaler |
-| `ebs_csi_driver.tf` | EBS CSI driver EKS managed addon |
-| `helm-provider.tf` | Helm provider pointing at the EKS cluster |
+| `ebs_csi_driver.tf` | EBS CSI driver managed addon |
+| `helm-provider.tf` | Helm provider configuration |
 | `helm-load-balancer-controller.tf` | AWS Load Balancer Controller via Helm |
-| `monitoring.tf` | Prometheus + Alertmanager stack via Helm |
-| `values.yaml` | Helm values for the Prometheus stack |
-| `Jenkinsfile` | Jenkins declarative pipeline definition |
+| `monitoring.tf` | Prometheus + Alertmanager via Helm |
+| `values.yaml` | Prometheus Helm chart values |
+| `Jenkinsfile` | Jenkins declarative pipeline (Apply/Destroy) |
+| `IMPLEMENTATION_GUIDE.md` | Deep explanation of every file and design decision |
+| `hashicorp-vault-explained.md` | HashiCorp Vault explained from scratch |

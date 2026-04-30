@@ -1,50 +1,51 @@
-# Implementation Guide — Understanding Every File and Decision
+# Implementation Guide — Deep Dive into Every File and Decision
 
-This document explains what each Terraform file does, why it exists, what would break without it, and what you need to customize before running this project yourself.
+This document explains what each file does, why design decisions were made, what pitfalls to avoid, and how everything connects. Read this alongside the README when you want to understand the *why* behind the *what*.
 
 ---
 
 ## Table of Contents
 
-1. [How Terraform Files Connect](#how-terraform-files-connect)
-2. [backend.tf — Remote State](#backendtf--remote-state)
-3. [provider.tf — Provider Configuration](#providertf--provider-configuration)
-4. [variables.tf — Input Variables](#variablestf--input-variables)
-5. [vpc.tf — Networking Foundation](#vpctf--networking-foundation)
-6. [eks.tf — Kubernetes Cluster](#ekstf--kubernetes-cluster)
-7. [iam.tf — Access Control](#iamtf--access-control)
-8. [autoscaler-iam.tf — Autoscaler Permissions](#autoscaler-iamtf--autoscaler-permissions)
-9. [autoscaler-manifest.tf — Autoscaler Workload](#autoscaler-manifesttf--autoscaler-workload)
-10. [ebs_csi_driver.tf — Block Storage](#ebs_csi_drivertf--block-storage)
-11. [helm-provider.tf — Helm Configuration](#helm-providertf--helm-configuration)
-12. [helm-load-balancer-controller.tf — Ingress](#helm-load-balancer-controllertf--ingress)
-13. [monitoring.tf — Observability](#monitoringtf--observability)
-14. [Jenkinsfile — CI/CD Pipeline](#jenkinsfile--cicd-pipeline)
-15. [values.yaml — Prometheus Configuration](#valuesyaml--prometheus-configuration)
-16. [Code Issues and Required Fixes](#code-issues-and-required-fixes)
-17. [Dependency Graph](#dependency-graph)
+1. [How All Files Connect](#1-how-all-files-connect)
+2. [backend.tf — Remote State](#2-backendtf--remote-state)
+3. [provider.tf — Provider Configuration](#3-providertf--provider-configuration)
+4. [variables.tf — Input Variables](#4-variablestf--input-variables)
+5. [vpc.tf — Networking Foundation](#5-vpctf--networking-foundation)
+6. [eks.tf — Kubernetes Cluster](#6-ekstf--kubernetes-cluster)
+7. [iam.tf — Access Control](#7-iamtf--access-control)
+8. [autoscaler-iam.tf — Autoscaler Permissions](#8-autoscaler-iamtf--autoscaler-permissions)
+9. [autoscaler-manifest.tf — Autoscaler Workload](#9-autoscaler-manifesttf--autoscaler-workload)
+10. [ebs_csi_driver.tf — Block Storage](#10-ebs_csi_drivertf--block-storage)
+11. [helm-provider.tf — Helm Configuration](#11-helm-providertf--helm-configuration)
+12. [helm-load-balancer-controller.tf — Ingress](#12-helm-load-balancer-controllertf--ingress)
+13. [monitoring.tf — Observability](#13-monitoringtf--observability)
+14. [Jenkinsfile — CI/CD Pipeline](#14-jenkinsfile--cicd-pipeline)
+15. [values.yaml — Prometheus Configuration](#15-valuesyaml--prometheus-configuration)
+16. [Fixes Applied to the Original Code](#16-fixes-applied-to-the-original-code)
+17. [Lessons Learned from Real Implementation](#17-lessons-learned-from-real-implementation)
+18. [Dependency Graph](#18-dependency-graph)
 
 ---
 
-## How Terraform Files Connect
+## 1. How All Files Connect
 
-Terraform processes all `.tf` files in the directory together as one configuration. There is no explicit import between files — Terraform resolves dependencies through resource and module references.
-
-The key data flow is:
+Terraform processes all `.tf` files in the directory as one configuration. There is no import between files — Terraform resolves the order of operations through resource references.
 
 ```
-vpc.tf  ──► eks.tf  ──► iam.tf
-                    ──► autoscaler-iam.tf ──► autoscaler-manifest.tf
-                    ──► helm-load-balancer-controller.tf
-                    ──► monitoring.tf
-                    ──► ebs_csi_driver.tf
+vpc.tf
+  └──► eks.tf
+         ├──► iam.tf
+         ├──► autoscaler-iam.tf ──► autoscaler-manifest.tf
+         ├──► ebs_csi_driver.tf
+         ├──► helm-load-balancer-controller.tf
+         └──► monitoring.tf
 ```
 
-`eks.tf` is the central file. Once the EKS cluster exists, all the workload files (autoscaler, LBC, monitoring) can talk to it.
+`eks.tf` is the central file. Every other workload file depends on the EKS cluster being up first. `provider.tf` and `backend.tf` are loaded before anything else.
 
 ---
 
-## backend.tf — Remote State
+## 2. backend.tf — Remote State
 
 ```hcl
 terraform {
@@ -57,18 +58,18 @@ terraform {
 }
 ```
 
-**What it does:** Stores the Terraform state file in S3 instead of locally. The DynamoDB table prevents two people (or two pipeline runs) from running `terraform apply` at the same time, which would corrupt state.
+**What it does:** Stores Terraform's state file in S3 instead of locally. The DynamoDB table acts as a lock — if two pipeline runs start at the same time, one waits until the other finishes.
 
-**Why it matters:** Without a remote backend, the state lives in a local `terraform.tfstate` file. This file is the source of truth for what Terraform "knows" about your infrastructure. If it gets lost or diverges between machines, you lose the ability to safely manage the infrastructure.
+**Why this matters:** The state file is what Terraform uses to know what it already created. If it's local and the Jenkins workspace gets cleaned (which it does — `cleanWs()` runs after every build), Terraform loses track of all resources. You can never safely destroy or update them again.
 
-**What you MUST change before running:**
-- Replace `devops-projects-terraform-backends` with your own S3 bucket name.
-- The bucket and DynamoDB table must exist before `terraform init` runs.
-- The AWS credentials used must have `s3:GetObject`, `s3:PutObject`, `dynamodb:PutItem`, `dynamodb:GetItem`, `dynamodb:DeleteItem` on these resources.
+**What you must change:**
+- Replace the bucket name with your own S3 bucket.
+- The bucket and DynamoDB table must exist BEFORE you run `terraform init`. Terraform cannot create its own backend.
+- The IAM credentials used must have S3 and DynamoDB access.
 
 ---
 
-## provider.tf — Provider Configuration
+## 3. provider.tf — Provider Configuration
 
 ```hcl
 provider "aws" {
@@ -77,222 +78,195 @@ provider "aws" {
 
 terraform {
   required_providers {
-    kubectl = { source = "gavinbunney/kubectl", version = ">= 1.14.0" }
-    helm    = { source = "hashicorp/helm",      version = ">= 2.6.0" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    kubectl = {
+      source  = "gavinbunney/kubectl"
+      version = ">= 1.14.0"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.6"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = ">= 2.10.0"
+    }
   }
-  required_version = "~> 1.0"
+  required_version = ">= 1.3.0"
 }
 ```
 
-**What it does:** Declares which provider plugins Terraform needs to download and what versions to accept. The AWS provider handles all `aws_*` resources. The kubectl provider handles raw YAML manifests (used by the autoscaler). The Helm provider installs Helm charts.
+**What each provider does:**
+- `aws` — creates all AWS resources (VPC, EKS, IAM, etc.)
+- `kubectl` — applies raw YAML manifests to Kubernetes (used for the Cluster Autoscaler)
+- `helm` — installs Helm charts (Prometheus, AWS Load Balancer Controller)
+- `kubernetes` — creates Kubernetes native resources (namespaces)
 
-**Issue — missing kubernetes provider declaration:**
-The `kubernetes` provider is used in `eks.tf` and `monitoring.tf` (for `kubernetes_namespace`, `kubernetes_config_map`) but is not declared in `required_providers`. This works because the `eks` module brings it in transitively, but it is fragile. Add this to be explicit:
+**Critical — Helm provider version must be pinned to `~> 2.6`:**
 
-```hcl
-required_providers {
-  aws = {
-    source  = "hashicorp/aws"
-    version = "~> 5.0"
-  }
-  kubectl = {
-    source  = "gavinbunney/kubectl"
-    version = ">= 1.14.0"
-  }
-  helm = {
-    source  = "hashicorp/helm"
-    version = ">= 2.6.0"
-  }
-  kubernetes = {
-    source  = "hashicorp/kubernetes"
-    version = ">= 2.10.0"
-  }
-}
+The original code used `>= 2.6.0` which allowed Terraform to install Helm provider v3.x. Version 3.x removed the `kubernetes {}` nested block syntax used in `helm-provider.tf`, causing this error:
+
+```
+Error: Unsupported block type
+  on helm-provider.tf line 2, in provider "helm":
+   2:   kubernetes {
+Blocks of type "kubernetes" are not expected here.
 ```
 
-**Why `~> 1.0` for Terraform version:** The tilde-arrow `~>` means "1.x but not 2.0". This is fine for Terraform 1.x, but Terraform 1.3.4 (what the Jenkinsfile installs) is outdated. Consider `>= 1.5.0` and update the Jenkinsfile download URL.
+The fix is `~> 2.6` which means "2.6 or newer, but not 3.0". This keeps the Helm provider on v2.x where the `kubernetes {}` block is valid.
 
 ---
 
-## variables.tf — Input Variables
+## 4. variables.tf — Input Variables
 
 ```hcl
-variable "cluster_name"       { default = "demo-eks-cluster" }
-variable "cluster_version"    { type = number, default = 1.27 }
-variable "region"             { default = "us-east-1" }
-variable "availability_zones" { type = list, default = ["us-east-1a", "us-east-1b"] }
-variable "addons"             { type = list(object({...})), default = [...] }
+variable "cluster_name"    { type = string, default = "demo-eks-cluster" }
+variable "cluster_version" { type = string, default = "1.32" }
+variable "region"          { type = string, default = "us-east-1" }
+variable "availability_zones" { type = list(any), default = ["us-east-1a", "us-east-1b"] }
+variable "addons" { type = list(object({name = string, version = string})), default = [...] }
 ```
 
-**What it does:** Defines all the tuneable inputs. Using variables instead of hardcoded values means you can run `terraform apply -var="region=us-west-2"` to target a different region without editing files.
+**EKS addon versions must match the cluster version.** The original code used EKS 1.27 with addon versions for 1.27. After upgrading to 1.32, addon versions were updated:
 
-**Issue — `cluster_version` type:** Using `number` for Kubernetes version works because `1.27` parses as a float, but this is semantically wrong. Kubernetes versions are strings (`"1.27"`). If the version has a patch (like `"1.27.3"`), it would fail as a number. Change to `type = string`.
+| Addon | Version for EKS 1.32 |
+|-------|---------------------|
+| kube-proxy | v1.32.0-eksbuild.2 |
+| vpc-cni | v1.19.2-eksbuild.1 |
+| coredns | v1.11.4-eksbuild.2 |
+| aws-ebs-csi-driver | v1.38.1-eksbuild.1 |
 
-**The addons list:**
-The `addons` variable is iterated in `ebs_csi_driver.tf` to create `aws_eks_addon` resources. The four managed addons are:
+To verify exact default versions available for your cluster version:
+```bash
+aws eks describe-addon-versions --kubernetes-version 1.32 --output table
+```
 
-| Addon | Purpose |
-|-------|---------|
-| `kube-proxy` | Network proxy on each node; maintains network rules |
-| `vpc-cni` | Assigns AWS VPC IP addresses to pods |
-| `coredns` | In-cluster DNS resolution for service discovery |
-| `aws-ebs-csi-driver` | Allows Kubernetes to provision EBS volumes as PersistentVolumes |
-
-**Note on `addons.json`:** There is also an `addons.json` file in the repository, but it is not referenced by any Terraform file. It appears to be documentation or a reference artifact from the original author. It has no effect on what gets deployed.
+**`cluster_version` must be `type = string`, not `type = number`.** Kubernetes versions like `"1.32"` are strings — using `number` is semantically wrong and breaks if a patch version (e.g., `"1.32.1"`) is ever needed.
 
 ---
 
-## vpc.tf — Networking Foundation
+## 5. vpc.tf — Networking Foundation
 
 ```hcl
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.0.0"
-
   cidr            = "10.0.0.0/16"
   private_subnets = ["10.0.0.0/19", "10.0.32.0/19"]
   public_subnets  = ["10.0.64.0/19", "10.0.96.0/19"]
-
-  enable_nat_gateway     = true
-  single_nat_gateway     = true
+  enable_nat_gateway = true
+  single_nat_gateway = true
   ...
 }
 ```
-
-**What it does:** Creates the entire network layer — VPC, subnets, route tables, an Internet Gateway, and a NAT Gateway.
 
 **Subnet design:**
-- **Public subnets** (`10.0.64.0/19`, `10.0.96.0/19`): Contain the NAT Gateway and any load balancers. The tag `kubernetes.io/role/elb = 1` tells the AWS Load Balancer Controller to place internet-facing ALBs here.
-- **Private subnets** (`10.0.0.0/19`, `10.0.32.0/19`): Contain EKS worker nodes. Nodes have no public IPs; they reach the internet via the NAT Gateway. The tag `kubernetes.io/role/internal-elb = 1` enables internal ALBs in these subnets.
 
-**Why `single_nat_gateway = true`:** Using one NAT Gateway saves money (~$32/month vs ~$64/month for two). The downside is that if `us-east-1a` has an outage, nodes in `us-east-1b` lose outbound internet access. For production, set `one_nat_gateway_per_az = true` and `single_nat_gateway = false`.
+| Subnet Type | CIDRs | Contains |
+|-------------|-------|----------|
+| Public | 10.0.64.0/19, 10.0.96.0/19 | NAT Gateway, internet-facing ALBs |
+| Private | 10.0.0.0/19, 10.0.32.0/19 | EKS worker nodes |
 
-**CIDR math:**
-- `/19` gives 8,190 usable IPs per subnet.
-- The VPC has `/16` = 65,536 IPs total.
-- Only 4 subnets are defined, leaving the rest of the CIDR available for future expansion.
+Worker nodes are in private subnets — they have no public IP addresses. They reach the internet through the NAT Gateway in the public subnet.
+
+**Subnet tags are required for the Load Balancer Controller to work:**
+- Public subnets: `kubernetes.io/role/elb = 1` (for internet-facing ALBs)
+- Private subnets: `kubernetes.io/role/internal-elb = 1` (for internal ALBs)
+
+**`single_nat_gateway = true`** uses one NAT Gateway to save money (~$32/month vs ~$64 for two). The tradeoff is that if the AZ hosting the NAT Gateway goes down, nodes in the other AZ lose outbound internet access. Acceptable for dev/test, not for production.
 
 ---
 
-## eks.tf — Kubernetes Cluster
+## 6. eks.tf — Kubernetes Cluster
 
-This is the most important file. It creates the EKS cluster, the managed node group, configures the aws-auth ConfigMap, and sets up the Kubernetes provider for the rest of Terraform.
+This is the most important file. It creates the EKS cluster, node groups, aws-auth ConfigMap, and the Kubernetes provider that all other workload files depend on.
 
-### EKS Cluster Module
+**Key settings:**
 
 ```hcl
-module "eks" {
-  source  = "terraform-aws-modules/eks/aws"
-  version = "18.29.0"
+cluster_endpoint_private_access = true
+cluster_endpoint_public_access  = true
+```
 
-  cluster_name    = var.cluster_name
-  cluster_version = var.cluster_version
+Both true means the EKS API server is reachable from within the VPC (by nodes) and from the internet (by Jenkins/operators). For stricter security, set `cluster_endpoint_public_access = false` and access only via VPN.
 
-  cluster_endpoint_private_access = true
-  cluster_endpoint_public_access  = true
+```hcl
+enable_irsa = true
+```
 
-  vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
-  enable_irsa = true
-  ...
+IRSA (IAM Roles for Service Accounts) lets Kubernetes pods assume IAM roles without storing AWS credentials. Used by the Cluster Autoscaler and Load Balancer Controller.
+
+**Node group:**
+```hcl
+general = {
+  desired_size   = 2
+  min_size       = 2
+  max_size       = 10
+  instance_types = ["t3.large"]
+  capacity_type  = "ON_DEMAND"
 }
 ```
 
-**`cluster_endpoint_private_access = true` + `cluster_endpoint_public_access = true`:** The EKS API server is accessible both from within the VPC (by worker nodes) and from the internet (by you/Jenkins). For stricter security, set `cluster_endpoint_public_access = false` and access via a VPN or bastion host.
+2 nodes by default, scalable to 10 by the Cluster Autoscaler. `t3.large` = 2 vCPU + 8GB RAM each.
 
-**`subnet_ids = module.vpc.private_subnets`:** Worker nodes launch in private subnets only. They cannot be directly accessed from the internet.
-
-**`enable_irsa = true`:** IRSA stands for IAM Roles for Service Accounts. This allows Kubernetes service accounts to assume IAM roles without distributing long-lived AWS credentials. It's used by the Cluster Autoscaler and Load Balancer Controller.
-
-### Managed Node Group
-
-```hcl
-eks_managed_node_groups = {
-  general = {
-    desired_size   = 2
-    min_size       = 2
-    max_size       = 10
-    instance_types = ["t3.large"]
-    capacity_type  = "ON_DEMAND"
-  }
-}
-```
-
-This creates an Auto Scaling Group with 2 nodes, scalable up to 10. `t3.large` gives 2 vCPU + 8GB RAM per node. The Cluster Autoscaler (deployed separately) watches pod pending states and triggers scale-out/in within these bounds.
-
-The spot node group is commented out. Spot instances cost 60–80% less but can be reclaimed with 2-minute notice. For fault-tolerant workloads (stateless apps), enabling the spot group makes economic sense.
-
-### aws-auth ConfigMap
-
+**aws-auth ConfigMap:**
 ```hcl
 manage_aws_auth_configmap = true
-aws_auth_roles = [
-  {
-    rolearn  = module.eks_admins_iam_role.iam_role_arn
-    username = module.eks_admins_iam_role.iam_role_name
-    groups   = ["system:masters"]
-  },
-]
+aws_auth_roles = [{
+  rolearn  = module.eks_admins_iam_role.iam_role_arn
+  username = module.eks_admins_iam_role.iam_role_name
+  groups   = ["system:masters"]
+}]
 ```
 
-The `aws-auth` ConfigMap in `kube-system` is EKS's way of mapping AWS IAM identities to Kubernetes RBAC. Adding the `eks-admin` role here with `system:masters` (cluster admin) means anyone who assumes that role can do anything in the cluster.
+This maps the `eks-admin` IAM role to the `system:masters` Kubernetes group (cluster admin). Anyone who assumes this IAM role can run any `kubectl` command.
 
-### Kubernetes Provider
-
+**Kubernetes provider uses exec-based token, not static token:**
 ```hcl
-provider "kubernetes" {
-  host                   = data.aws_eks_cluster.default.endpoint
-  cluster_ca_certificate = base64decode(...)
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    args        = ["eks", "get-token", "--cluster-name", data.aws_eks_cluster.default.id]
-    command     = "aws"
-  }
+exec {
+  api_version = "client.authentication.k8s.io/v1beta1"
+  args        = ["eks", "get-token", "--cluster-name", data.aws_eks_cluster.default.id]
+  command     = "aws"
 }
 ```
 
-Instead of using a static token, the provider calls `aws eks get-token` every time it needs to authenticate. This is the recommended approach because EKS tokens expire after 15 minutes.
-
-**Important:** This means the AWS CLI must be installed and configured wherever `terraform apply` runs (i.e., on the Jenkins server).
+EKS tokens expire after 15 minutes. Instead of a static token, the provider calls `aws eks get-token` each time it needs to authenticate. This requires AWS CLI to be installed wherever Terraform runs.
 
 ---
 
-## iam.tf — Access Control
+## 7. iam.tf — Access Control
 
-This file builds an IAM hierarchy for EKS cluster access. Here's how the pieces connect:
+Creates an IAM hierarchy for cluster access:
 
 ```
 user1 (IAM User)
   └── eks-admin (IAM Group)
-        └── allow-assume-eks-admin-iam-role (IAM Policy)
-              └── eks-admin (IAM Role)  ← also in aws-auth ConfigMap
-                    └── allow-eks-access (IAM Policy: eks:DescribeCluster)
+        └── allow-assume-eks-admin-iam-role (Policy: sts:AssumeRole)
+              └── eks-admin (IAM Role) ← mapped in aws-auth ConfigMap
+                    └── allow-eks-access (Policy: eks:DescribeCluster)
 ```
 
-**Why this pattern (role assumption)?**
-Direct access: give users an IAM policy that grants Kubernetes access.
-Role assumption (this pattern): users don't have Kubernetes permissions directly — they assume a role that does. This is better because:
-- You can revoke access by removing users from the group, not by editing cluster configs.
-- You can require MFA for role assumption (`role_requires_mfa = true`).
-- You can audit who assumed the role via CloudTrail.
+**Why role assumption instead of direct access?**
 
-**`user1`:** A placeholder IAM user created without access keys or login profile. In practice, you would add real users here, or replace this with an IAM group mapped to your organization's SSO.
+Users don't get Kubernetes permissions directly. They assume a role that has those permissions. Benefits:
+- Revoke access by removing a user from the group — no cluster config changes needed
+- Full CloudTrail audit of who assumed the role and when
+- Can require MFA for role assumption
 
-**`trusted_role_arns = ["arn:aws:iam::${module.vpc.vpc_owner_id}:root"]`:** The `:root` principal means any IAM identity in the account can attempt to assume this role, subject to having the `allow-assume-eks-admin-iam-role` policy. This is a common pattern — the role itself restricts what it can do; the policy restricts who can assume it.
+**`user1`** is a placeholder IAM user. Replace with real users or integrate with SSO.
 
 ---
 
-## autoscaler-iam.tf — Autoscaler Permissions
+## 8. autoscaler-iam.tf — Autoscaler Permissions
 
 ```hcl
 module "cluster_autoscaler_irsa_role" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "5.3.1"
-
   role_name                        = "cluster-autoscaler"
   attach_cluster_autoscaler_policy = true
   cluster_autoscaler_cluster_ids   = [module.eks.cluster_id]
-
   oidc_providers = {
     ex = {
       provider_arn               = module.eks.oidc_provider_arn
@@ -302,55 +276,47 @@ module "cluster_autoscaler_irsa_role" {
 }
 ```
 
-**What it does:** Creates an IAM role that can only be assumed by the `cluster-autoscaler` service account in the `kube-system` namespace. The `attach_cluster_autoscaler_policy = true` flag attaches a pre-built policy that grants permissions to describe and modify Auto Scaling Groups.
+Creates an IAM role scoped to exactly one Kubernetes service account (`kube-system:cluster-autoscaler`). The Cluster Autoscaler pod uses this role to call AWS ASG APIs and scale node groups up or down.
 
 **How IRSA works:**
-1. EKS runs an OIDC provider (a trust authority).
-2. The IAM role's trust policy says: "trust tokens signed by this EKS OIDC provider for service account `kube-system:cluster-autoscaler`".
-3. When the autoscaler pod starts, it gets a JWT token via a projected service account volume.
-4. The AWS SDK exchanges this JWT for temporary AWS credentials by calling the OIDC provider.
-
-No static credentials are stored anywhere. Access is scoped to exactly one service account.
+1. EKS provides an OIDC identity provider
+2. The IAM role's trust policy allows tokens from that OIDC provider for the specific service account
+3. The pod receives a JWT token via a projected volume
+4. AWS SDK exchanges the JWT for temporary credentials — no static keys anywhere
 
 ---
 
-## autoscaler-manifest.tf — Autoscaler Workload
+## 9. autoscaler-manifest.tf — Autoscaler Workload
 
-This file deploys the Cluster Autoscaler into the cluster using raw YAML manifests. It creates:
+Deploys the Cluster Autoscaler using raw YAML manifests (via the `kubectl` provider). Creates:
 
-| Resource | Kind | Purpose |
-|----------|------|---------|
-| `cluster-autoscaler` | ServiceAccount | Kubernetes identity; annotated with the IRSA role ARN |
-| `cluster-autoscaler` | Role | Grants access to ConfigMaps in kube-system |
-| `cluster-autoscaler` | RoleBinding | Binds the Role to the ServiceAccount |
-| `cluster-autoscaler` | ClusterRole | Grants cluster-wide read/write access to node/pod resources |
-| `cluster-autoscaler` | ClusterRoleBinding | Binds the ClusterRole to the ServiceAccount |
-| `cluster-autoscaler` | Deployment | Runs the autoscaler as a single pod |
+- `ServiceAccount` — annotated with the IRSA role ARN
+- `Role` + `RoleBinding` — namespace-scoped access to ConfigMaps
+- `ClusterRole` + `ClusterRoleBinding` — cluster-wide access to nodes/pods
+- `Deployment` — runs the autoscaler pod
 
 **How autoscaling works:**
-1. A pod enters `Pending` state because no node has enough free capacity.
-2. The autoscaler detects this via the Kubernetes API (using ClusterRole permissions).
-3. The autoscaler identifies which Auto Scaling Group can accommodate the pod.
-4. It calls the AWS ASG API (using IRSA credentials) to increment `DesiredCapacity`.
-5. A new EC2 instance launches, joins the cluster, and the pod is scheduled.
-6. If nodes are underutilized for 10 minutes, the autoscaler removes them.
+1. Pod enters `Pending` — no node has capacity
+2. Autoscaler detects this via the Kubernetes API
+3. Identifies which ASG can accommodate the pod
+4. Calls AWS ASG API to increase `DesiredCapacity`
+5. New EC2 instance joins the cluster
+6. Pod is scheduled
 
-**Known issue — deprecated container image registry:**
-```
-image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.23.1
-```
-`k8s.gcr.io` was retired in March 2023. Images were migrated to `registry.k8s.io`. Also, autoscaler version v1.23.1 is designed for Kubernetes 1.23, but this cluster runs 1.27. The autoscaler version must match the cluster minor version.
+Scale-in: if nodes are underutilized for 10 minutes, autoscaler removes them.
 
-**Fix — update `autoscaler-manifest.tf` line 176:**
-```hcl
-image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.27.8
+**Image registry was updated:**
+
+Original code used `k8s.gcr.io` which was retired in March 2023. Fixed to:
+```yaml
+image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0
 ```
 
-Find the correct tag at: https://github.com/kubernetes/autoscaler/releases
+The autoscaler version must match the EKS cluster minor version (EKS 1.32 → autoscaler v1.32.x).
 
 ---
 
-## ebs_csi_driver.tf — Block Storage
+## 10. ebs_csi_driver.tf — Block Storage
 
 ```hcl
 resource "aws_eks_addon" "addons" {
@@ -361,15 +327,11 @@ resource "aws_eks_addon" "addons" {
 }
 ```
 
-**What it does:** Iterates the `addons` list from `variables.tf` and creates an EKS managed addon for each entry. This includes the `aws-ebs-csi-driver`.
-
-**Why the EBS CSI driver matters:** By default, EKS clusters have no way to provision persistent storage. Any pod that needs to store data across restarts (like Prometheus) needs a PersistentVolume backed by EBS. The CSI driver is what allows Kubernetes to call `aws ec2 create-volume` when a PersistentVolumeClaim is created.
-
-**Note:** The EBS CSI driver addon requires its own IAM role in a production setup. This project uses the node IAM role's permissions implicitly, which works but is not least-privilege. For strict environments, add an `ebs-csi-controller-sa` IRSA role.
+Iterates the `addons` variable and creates managed EKS addons. The `aws-ebs-csi-driver` is the one that enables persistent storage — without it, Prometheus and any stateful workload cannot create PersistentVolumes backed by EBS.
 
 ---
 
-## helm-provider.tf — Helm Configuration
+## 11. helm-provider.tf — Helm Configuration
 
 ```hcl
 provider "helm" {
@@ -385,43 +347,32 @@ provider "helm" {
 }
 ```
 
-Same authentication pattern as the Kubernetes provider — uses `aws eks get-token` rather than a static bearer token. This provider manages Helm chart deployments as Terraform resources.
+Same exec-based auth as the Kubernetes provider. Both providers must point to the same cluster with the same auth method.
+
+**The `kubernetes {}` block requires Helm provider v2.x.** Helm provider v3.x changed this syntax — pinning to `~> 2.6` in `provider.tf` prevents Terraform from installing v3.x.
 
 ---
 
-## helm-load-balancer-controller.tf — Ingress
+## 12. helm-load-balancer-controller.tf — Ingress
 
-```hcl
-module "aws_load_balancer_controller_irsa_role" { ... }
+Deploys the AWS Load Balancer Controller via Helm. This controller watches Kubernetes `Ingress` and `Service` (type: LoadBalancer) resources and creates corresponding AWS ALBs and NLBs.
 
-resource "helm_release" "aws_load_balancer_controller" {
-  name       = "aws-load-balancer-controller"
-  repository = "https://aws.github.io/eks-charts"
-  chart      = "aws-load-balancer-controller"
-  version    = "1.4.4"
-  ...
-}
-```
+Without this controller:
+- `Service` type LoadBalancer creates a deprecated classic ELB
+- `Ingress` resources are ignored
 
-**What it does:** Deploys the AWS Load Balancer Controller, which watches for Kubernetes `Ingress` and `Service` resources of type `LoadBalancer` and creates corresponding AWS ALBs and NLBs.
-
-**Without this controller:** Any `Service` of type `LoadBalancer` creates a classic ELB (deprecated). Any `Ingress` resource is ignored (no in-tree AWS ingress controller exists in modern EKS).
-
-**With this controller:** You can create an ALB with a single annotation on your Ingress:
+With this controller, create an ALB by annotating your Ingress:
 ```yaml
-metadata:
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
+annotations:
+  kubernetes.io/ingress.class: alb
+  alb.ingress.kubernetes.io/scheme: internet-facing
 ```
 
-**Issue — outdated version:** Chart version 1.4.4 is from late 2022. The current version is 1.6+. Update the `version` field to get security patches and bug fixes. Check the current version at https://github.com/aws/eks-charts.
-
-**IRSA role:** Same pattern as the autoscaler — a dedicated IAM role for the `aws-load-balancer-controller` service account in `kube-system`.
+Uses an IRSA role scoped to `kube-system:aws-load-balancer-controller`.
 
 ---
 
-## monitoring.tf — Observability
+## 13. monitoring.tf — Observability
 
 ```hcl
 resource "time_sleep" "wait_for_kubernetes" {
@@ -441,191 +392,174 @@ resource "helm_release" "prometheus" {
 }
 ```
 
-**What `time_sleep` does:** After the EKS module reports the cluster as ready, the Kubernetes API may not be fully responsive for a few seconds. The 20-second sleep prevents the subsequent `kubernetes_namespace` from failing with a connection error. This is a workaround for a known race condition.
+**Why the 20-second sleep:** After EKS reports "ready", the Kubernetes API takes a few more seconds to become fully responsive. Without this delay, `kubernetes_namespace` fails with a connection error. This is a known race condition workaround.
 
-**What gets deployed:**
-The `kube-prometheus-stack` Helm chart installs a complete monitoring stack:
+**What the Prometheus stack installs:**
 
-| Component | Function |
-|-----------|----------|
-| Prometheus | Time-series database; scrapes metrics from all cluster components |
-| Alertmanager | Routes alerts from Prometheus to email/Slack/PagerDuty |
-| kube-state-metrics | Exposes Kubernetes object state as metrics (pod restarts, deployment replicas, etc.) |
-| node-exporter | Exposes OS-level metrics (CPU, memory, disk) from each node |
-| Prometheus Operator | Manages Prometheus configuration declaratively via CRDs |
+| Component | Purpose |
+|-----------|---------|
+| Prometheus | Scrapes and stores metrics |
+| Alertmanager | Routes alerts to email/Slack/PagerDuty |
+| kube-state-metrics | Kubernetes object state as metrics |
+| node-exporter | OS metrics from each node (CPU, memory, disk) |
 
-**Issue — Prometheus memory limit is too low:**
-```hcl
-set {
-  name  = "prometheus.server.resources"
-  value = yamlencode({
-    limits   = { cpu = "200m", memory = "50Mi" }
-    requests = { cpu = "100m", memory = "30Mi" }
-  })
-}
-```
-50Mi is far too small for Prometheus. It will OOMKill within minutes of starting when it has real cluster metrics to store. A realistic minimum for a small cluster is 512Mi. Increase this before applying.
+**Prometheus memory limit was fixed** — the original 50Mi limit caused immediate OOMKill. Updated to 1Gi limit / 512Mi request.
 
 ---
 
-## Jenkinsfile — CI/CD Pipeline
+## 14. Jenkinsfile — CI/CD Pipeline
 
-### Stage 1: Fetch Credentials from Vault
+### Pipeline Design — ACTION Parameter
+
+The original pipeline had a blocking `input()` prompt after provisioning to ask if the user wanted to destroy. This caused the pipeline to **hang indefinitely** after a successful apply, waiting for someone to click a button.
+
+The redesign uses a pipeline **parameter selected before the run**:
 
 ```groovy
-withCredentials([
-    string(credentialsId: 'VAULT_URL',      variable: 'VAULT_URL'),
-    string(credentialsId: 'vault-role-id',  variable: 'VAULT_ROLE_ID'),
-    string(credentialsId: 'vault-secret-id', variable: 'VAULT_SECRET_ID')
-]) {
-    sh '''
-    VAULT_TOKEN=$(vault write -field=token auth/approle/login \
-        role_id=${VAULT_ROLE_ID} secret_id=${VAULT_SECRET_ID})
-    export VAULT_TOKEN=$VAULT_TOKEN
-
-    GIT_TOKEN=$(vault kv get -field=pat secret/github)
-    AWS_ACCESS_KEY_ID=$(vault kv get -field=aws_access_key_id aws/terraform-project)
-    AWS_SECRET_ACCESS_KEY=$(vault kv get -field=aws_secret_access_key aws/terraform-project)
-
-    echo "export GIT_TOKEN=${GIT_TOKEN}" >> vault_env.sh
-    echo "export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}" >> vault_env.sh
-    echo "export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" >> vault_env.sh
-    '''
+parameters {
+    choice(
+        name: 'ACTION',
+        choices: ['Apply', 'Destroy'],
+        description: 'Select Apply to provision or Destroy to tear down.'
+    )
 }
 ```
 
-**What happens:** Jenkins pulls three credentials from its own credential store (not Vault). These are used to authenticate to Vault. Once authenticated, Jenkins retrieves the actual secrets (AWS keys, GitHub token) and writes them to `vault_env.sh`, which subsequent stages source.
+- **Apply** run: runs Fetch Credentials → Checkout → Install Terraform → Init → Plan+Apply → Verify
+- **Destroy** run: runs Fetch Credentials → Checkout → Install Terraform → Init → Destroy
 
-**Security concern:** This approach writes secrets to a file on disk. The `cleanWs()` in the `post` block deletes the workspace including this file. However, the credentials appear in the Terraform environment, which means they could appear in debug output. The debug `echo` lines in Stage 4 (`echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"`) are a real security risk — remove them.
+Each stage uses `when { expression { return params.ACTION == 'Apply' } }` to control which stages execute.
 
-**AppRole TTL:** The `secret_id` has a 24-hour default TTL. If the pipeline runs after 24 hours have passed since the `secret_id` was generated, login will fail. Automate secret_id rotation or increase the TTL in Vault's AppRole configuration.
+### Stage: Fetch Credentials from Vault
 
-### Stage 3: Install Terraform
+Jenkins stores only three non-sensitive values: `VAULT_URL`, `vault-role-id`, `vault-secret-id`. The pipeline uses these to authenticate to Vault and retrieve the actual secrets at runtime.
 
-```sh
-wget -q -O terraform.zip https://releases.hashicorp.com/terraform/1.3.4/terraform_1.3.4_linux_amd64.zip
+The retrieved secrets are written to `vault_env.sh` — a temporary shell script that subsequent stages source to load credentials into their environment. The `cleanWs()` in the `post` block deletes the workspace (including this file) after every run.
+
+### Stage: Checkout Source Code
+
+```groovy
+sh '''
+git clone https://github.com/cojocloud/terraform-aws-eks-hashicorp-vault.git
+'''
 ```
 
-**Issue:** Downloads Terraform 1.3.4 on every pipeline run (slow). Consider pre-installing Terraform on the Jenkins server and using the Jenkins Terraform plugin to manage versions, or pin a more recent version (1.6+).
+The repo is public so no credentials are needed here. The GIT_TOKEN from Vault is available for private repos if needed.
 
-### Stage 4: Terraform Init and Apply
+**Critical naming detail:** The cloned directory is named `terraform-aws-eks-hashicorp-vault` (matching the repo name). All subsequent stages `cd` into this directory. If this name is wrong, every Terraform stage fails with `No such file or directory`.
 
-```sh
-. ${WORKSPACE}/vault_env.sh
-cd terraform-aws-eks-hashicorp-vault
-../terraform init
-../terraform plan -out=tfplan
-../terraform apply -auto-approve tfplan
-```
+### Stage: Install Terraform
 
-The pipeline sources `vault_env.sh` to load AWS credentials into the shell environment. Terraform picks them up via the standard `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables.
+Downloads Terraform 1.9.0 into the Jenkins workspace on every run. This is slightly slow (~30s) but ensures the correct version is always used regardless of what is installed on the server.
 
-### Stage 5: Update Kubeconfig
+### Stage: Terraform Init
 
-```sh
+Sources `vault_env.sh` to load AWS credentials, then runs `terraform init`. This downloads all providers and connects to the S3 backend. The `.terraform.lock.hcl` file generated here records the exact provider versions — commit this file to your repo.
+
+### Stage: Terraform Plan and Apply
+
+Runs plan then apply in sequence. EKS provisioning takes 15–20 minutes. The `vault_env.sh` must be sourced in every stage because each `sh` block runs in a separate shell process — environment variables do not persist between stages.
+
+### Stage: Update Kubeconfig and Verify
+
+```bash
 CLUSTER_NAME=$(aws eks list-clusters --region us-east-1 --query 'clusters[0]' --output text)
-aws eks update-kubeconfig --name $CLUSTER_NAME --region us-east-1 \
-    --kubeconfig /var/lib/jenkins/.kube/config
 ```
 
-**Fragile point:** `clusters[0]` returns the first cluster alphabetically. If your account has multiple EKS clusters, this may pick the wrong one. Replace with a direct reference:
-```sh
-CLUSTER_NAME="${var.cluster_name}"  # or hardcode: demo-eks-cluster
-```
+Retrieves the cluster name dynamically. Note: `clusters[0]` returns the first cluster alphabetically — if you have multiple EKS clusters in the account, this may pick the wrong one. Replace with the hardcoded name `demo-eks-cluster` for reliability.
 
-### Stage 6 & 7: Destroy (Optional)
-
-The pipeline pauses and prompts the operator before destroying. Selecting "No" marks the build as `SUCCESS` and skips the destroy stage. This prevents accidental teardown when the pipeline is only intended to apply changes.
+Updates the kubeconfig for the Jenkins user at `/var/lib/jenkins/.kube/config` and verifies connectivity with `kubectl get nodes`.
 
 ---
 
-## values.yaml — Prometheus Configuration
+## 15. values.yaml — Prometheus Configuration
 
-The `values.yaml` file overrides Helm chart defaults for the Prometheus stack. Key settings:
+Overrides Helm chart defaults for the Prometheus stack:
 
-| Setting | Value | Meaning |
-|---------|-------|---------|
-| `rbac.create` | `true` | Creates RBAC resources for Prometheus |
-| `alertmanager.enabled` | `true` | Deploys Alertmanager |
-| `kube-state-metrics.enabled` | `true` | Deploys kube-state-metrics |
-| `prometheus-node-exporter.enabled` | `true` | Deploys node exporter on every node |
-| `server.retention` | `15d` | Keeps 15 days of metrics data |
-| `server.persistentVolume.enabled` | `true` | Uses EBS for storage |
-| `server.persistentVolume.size` | `8Gi` | 8 GB EBS volume |
-| `server.service.type` | `ClusterIP` | Not exposed externally (use port-forward to access) |
-
----
-
-## Code Issues and Required Fixes
-
-### Fix 1 — Update deprecated image registry (autoscaler-manifest.tf:176)
-
-**Current:**
-```yaml
-image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.23.1
-```
-**Fix:**
-```yaml
-image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.27.8
-```
-The version must match your EKS cluster minor version (1.27 → autoscaler v1.27.x).
-
-### Fix 2 — Remove credential debug echo (Jenkinsfile:91-92)
-
-**Current:**
-```sh
-echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
-echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
-```
-**Fix:** Delete both lines. Jenkins masks credentials in `withCredentials` blocks, but these credentials come from `vault_env.sh` outside that block, so they will appear in plain text in the build log.
-
-### Fix 3 — Fix Prometheus memory limit (monitoring.tf:47)
-
-**Current:**
-```hcl
-limits = { cpu = "200m", memory = "50Mi" }
-```
-**Fix:**
-```hcl
-limits   = { cpu = "500m", memory = "1Gi" }
-requests = { cpu = "200m", memory = "512Mi" }
-```
-
-### Fix 4 — Declare kubernetes provider (provider.tf)
-
-Add to `required_providers`:
-```hcl
-kubernetes = {
-  source  = "hashicorp/kubernetes"
-  version = ">= 2.10.0"
-}
-```
-
-### Fix 5 — Change cluster_version type (variables.tf:6)
-
-**Current:** `type = number`
-**Fix:** `type = string` and update default to `"1.27"`
+| Setting | Value | Why |
+|---------|-------|-----|
+| `server.retention` | `15d` | Keep 15 days of metrics |
+| `server.persistentVolume.enabled` | `true` | Use EBS for data persistence |
+| `server.persistentVolume.size` | `8Gi` | 8GB EBS volume |
+| `server.service.type` | `ClusterIP` | Not exposed externally — use port-forward |
+| `alertmanager.enabled` | `true` | Deploy Alertmanager |
+| `kube-state-metrics.enabled` | `true` | Deploy kube-state-metrics |
+| `prometheus-node-exporter.enabled` | `true` | Deploy node exporter on every node |
 
 ---
 
-## Dependency Graph
+## 16. Fixes Applied to the Original Code
 
-The order Terraform applies resources (simplified):
+All of these were bugs or outdated configurations in the original repo that needed fixing:
+
+| File | Original Issue | Fix Applied |
+|------|---------------|------------|
+| `autoscaler-manifest.tf` | Image used retired `k8s.gcr.io` registry; version v1.23.1 mismatched with EKS | Changed to `registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0` |
+| `variables.tf` | `cluster_version` typed as `number` | Changed to `type = string` |
+| `variables.tf` | EKS 1.27 end-of-life | Upgraded to 1.32 with matching addon versions |
+| `provider.tf` | Missing `aws` and `kubernetes` in `required_providers` | Added both with version constraints |
+| `provider.tf` | Helm version `>= 2.6.0` allowed v3.x (breaking) | Pinned to `~> 2.6` |
+| `monitoring.tf` | Prometheus memory limit 50Mi caused OOMKill | Raised to 1Gi limit / 512Mi request |
+| `Jenkinsfile` | Debug echo lines printed AWS credentials in plain text | Removed |
+| `Jenkinsfile` | Blocking `input()` prompt caused pipeline to hang after apply | Replaced with `ACTION` parameter chosen before run |
+| `Jenkinsfile` | Terraform 1.3.4 (outdated) | Updated to 1.9.0 |
+| `Jenkinsfile` | Wrong repo directory name `aws-eks-terraform` | Fixed to `terraform-aws-eks-hashicorp-vault` |
+
+---
+
+## 17. Lessons Learned from Real Implementation
+
+These are real issues encountered during implementation of this project:
+
+**Vault must run as a systemd service, not a background process.**
+Running `vault server -dev &` dies when the SSH session ends. Always use a systemd service file with `Restart=on-failure`. Check with `sudo systemctl status vault`.
+
+**Vault CLI must be installed on the Jenkins server, not just the Vault server.**
+The pipeline runs shell commands (`vault write`, `vault kv get`) on the Jenkins server. The Jenkins server needs the Vault CLI binary to execute these — it does not need to run the Vault server.
+
+**VAULT_URL must be the Vault server's private IP, not localhost or the public IP.**
+- `127.0.0.1` — means the Jenkins server itself. Vault is not running there. Fails with `connection refused`.
+- Public IP — works but is slower and costs egress. Don't use for internal VPC communication.
+- Private IP (`172.31.x.x`) — correct. Both servers are in the same VPC. Free and reliable.
+
+**Vault dev mode wipes everything on restart.**
+Dev mode stores all secrets in memory. Every Vault restart = all secrets, policies, AppRole config gone. You must re-run the full Vault configuration after every restart. The `-dev-root-token-id=root` flag sets a fixed root token so you don't have to look it up each time.
+
+**KV v2 policy paths include `/data/` — KV v1 paths do not.**
+The `secret/` mount (default in dev mode) is KV v2. When Vault CLI reads `secret/github`, the API call goes to `/v1/secret/data/github`. The policy must allow `secret/data/github`, not `secret/github`. The `aws/` mount (enabled manually with `vault secrets enable -path=aws kv`) is KV v1 — no `/data/` prefix.
+
+**Avoid heredoc in shell commands when possible.**
+The `<<EOF ... EOF` pattern fails if the closing `EOF` has any spaces before it, or if the command is split across lines in a way the shell can't parse. Write multiline content to a file with `cat > /tmp/file.hcl << 'EOF'` and then reference the file.
+
+**Never bind Vault to the EC2 public IP directly.**
+EC2 instances don't own their public IP — AWS handles it through NAT. You cannot bind a server process to a public IP. Always bind to `0.0.0.0` (all interfaces) or the private IP (`172.31.x.x`). External traffic still reaches it via the public IP.
+
+**Helm provider v3.x is a breaking change — pin to `~> 2.6`.**
+The `kubernetes {}` nested block in `helm-provider.tf` is only valid in Helm provider v2.x. Without pinning, Terraform installs the latest version which may be v3.x, causing `Unsupported block type` errors on `terraform plan`.
+
+**The pipeline's `Checkout Source Code` directory name must match the cloned repo.**
+`git clone` creates a directory named after the repo (e.g., `terraform-aws-eks-hashicorp-vault`). Every subsequent stage that does `cd terraform-aws-eks-hashicorp-vault` must use the exact same name. A mismatch causes every Terraform stage to fail.
+
+---
+
+## 18. Dependency Graph
+
+The order Terraform creates resources:
 
 ```
-1. VPC (vpc.tf)
-   └── 2. EKS Cluster (eks.tf)
-         ├── 3a. aws-auth ConfigMap (eks.tf, via module)
-         ├── 3b. IAM Roles (iam.tf, autoscaler-iam.tf, helm-load-balancer-controller.tf)
-         ├── 3c. EKS Addons (ebs_csi_driver.tf)
-         │
-         └── 4. [20s sleep] (monitoring.tf)
-               ├── 5a. prometheus namespace (monitoring.tf)
-               │     └── 6a. Prometheus Helm release (monitoring.tf)
-               ├── 5b. Cluster Autoscaler RBAC + Deployment (autoscaler-manifest.tf)
-               └── 5c. AWS Load Balancer Controller Helm release (helm-load-balancer-controller.tf)
+1. VPC + Subnets + NAT Gateway (vpc.tf)
+   └── 2. EKS Cluster + Node Group (eks.tf)
+         ├── 3a. aws-auth ConfigMap (eks.tf)
+         ├── 3b. IAM Roles and Policies (iam.tf)
+         ├── 3c. IRSA Roles (autoscaler-iam.tf, helm-load-balancer-controller.tf)
+         ├── 3d. EKS Managed Addons (ebs_csi_driver.tf)
+         └── 3e. [20-second sleep] (monitoring.tf)
+               ├── 4a. prometheus Namespace (monitoring.tf)
+               │     └── 5a. Prometheus Helm Release (monitoring.tf)
+               ├── 4b. Cluster Autoscaler Manifests (autoscaler-manifest.tf)
+               └── 4c. AWS LBC Helm Release (helm-load-balancer-controller.tf)
 ```
 
-Resources at the same numbered level can be created in parallel by Terraform.
+Resources at the same level can be created in parallel. Terraform handles this automatically.
 
-Terraform destroy runs this graph in reverse — Helm releases and Kubernetes resources are deleted before the EKS cluster, and the EKS cluster before the VPC.
+**Destroy runs this graph in reverse** — Helm releases and Kubernetes resources are removed before the EKS cluster, and the EKS cluster before the VPC. This ordering is critical: deleting the VPC while EKS still exists leaves orphaned resources that cannot be cleaned up through Terraform.
