@@ -59,7 +59,7 @@ pipeline {
                     echo "Checking out source code from GitHub..."
                     sh '''
                     git clone https://${GIT_TOKEN}@github.com/SubbuTechOps/aws-eks-terraform.git
-                    cd aws-eks-terraform
+                    cd terraform-aws-eks-hashicorp-vault
                     '''
                 }
             }
@@ -84,7 +84,7 @@ pipeline {
                 sh '''
                 export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
                 export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
-                cd aws-eks-terraform
+                cd terraform-aws-eks-hashicorp-vault
                 . ${WORKSPACE}/vault_env.sh
         
                 ../terraform init
@@ -100,7 +100,7 @@ pipeline {
                 . ${WORKSPACE}/vault_env.sh
         
                 # Run Terraform
-                cd aws-eks-terraform
+                cd terraform-aws-eks-hashicorp-vault
                 ../terraform plan -out=tfplan
 		echo "Running Terraform Apply..."
                 ../terraform apply -auto-approve tfplan
@@ -182,7 +182,7 @@ pipeline {
 	        . ${WORKSPACE}/vault_env.sh
 	
 	        # Run Terraform destroy
-	        cd aws-eks-terraform
+	        cd terraform-aws-eks-hashicorp-vault
 	        ../terraform destroy -auto-approve
 	        '''
 	    }

@@ -512,7 +512,7 @@ wget -q -O terraform.zip https://releases.hashicorp.com/terraform/1.3.4/terrafor
 
 ```sh
 . ${WORKSPACE}/vault_env.sh
-cd aws-eks-terraform
+cd terraform-aws-eks-hashicorp-vault
 ../terraform init
 ../terraform plan -out=tfplan
 ../terraform apply -auto-approve tfplan

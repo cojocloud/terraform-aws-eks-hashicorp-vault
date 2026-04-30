@@ -9,7 +9,7 @@ A production-ready Infrastructure-as-Code (IaC) project that provisions a fully 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | Networking | AWS VPC (Terraform module) | Isolated network with public/private subnets |
-| Kubernetes | AWS EKS 1.27 | Managed control plane + managed node groups |
+| Kubernetes | AWS EKS 1.32 | Managed control plane + managed node groups |
 | Secrets | HashiCorp Vault (AppRole) | Secure storage of AWS and GitHub credentials |
 | CI/CD | Jenkins | Automated pipeline to plan/apply/destroy infra |
 | Autoscaling | Cluster Autoscaler | Scale worker nodes based on pod demand |

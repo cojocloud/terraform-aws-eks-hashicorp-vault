@@ -5,7 +5,7 @@ variable "cluster_name" {
 
 variable "cluster_version" {
   type    = string
-  default = "1.27"
+  default = "1.32"
 }
 
 variable "region" {
@@ -29,7 +29,7 @@ variable "addons" {
   default = [
     {
       name    = "kube-proxy"
-      version = "v1.27.16-eksbuild.14"
+      version = "v1.32.0-eksbuild.2"
     },
     {
       name    = "vpc-cni"
@@ -37,7 +37,7 @@ variable "addons" {
     },
     {
       name    = "coredns"
-      version = "v1.10.1-eksbuild.17"
+      version = "v1.11.4-eksbuild.2"
     },
     {
       name    = "aws-ebs-csi-driver"
