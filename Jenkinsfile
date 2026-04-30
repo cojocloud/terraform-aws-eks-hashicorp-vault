@@ -58,7 +58,7 @@ pipeline {
                 script {
                     echo "Checking out source code from GitHub..."
                     sh '''
-                    git clone https://${GIT_TOKEN}@github.com/SubbuTechOps/aws-eks-terraform.git
+                    git clone https://github.com/cojocloud/terraform-aws-eks-hashicorp-vault.git
                     cd terraform-aws-eks-hashicorp-vault
                     '''
                 }
